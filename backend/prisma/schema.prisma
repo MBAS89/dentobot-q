@@ -1,15 +1,127 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
-  output   = "../generated/prisma"
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model User {
+  id                 String   @id @default(cuid())
+  email              String   @unique
+  password           String // hashed password
+  clinicName         String
+  clinicAddress      String?
+  clinicPhone        String?
+  languagePreference String? // 'en', 'ar', 'bilingual'
+  currency           String? // 'USD', 'AED', 'EGP', 'NIS', etc.
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  // Relations
+  whatsappSessions WhatsappSession[]
+  appointments     Appointment[]
+  clinicSettings   ClinicSetting?
+}
+
+model ClinicSetting {
+  id                String          @id @default(cuid())
+  userId            String          @unique
+  greetingMessageEn String?
+  greetingMessageAr String?
+  workingHours      Json? // { "sunday": { "open": "09:00", "close": "17:00" }, ... }
+  services          Service[]
+  customKeywords    CustomKeyword[]
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
+
+  // Relations
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Service {
+  id              String   @id @default(cuid())
+  nameEn          String
+  nameAr          String?
+  descriptionEn   String?
+  descriptionAr   String?
+  price           Float
+  currency        String // 'USD', 'AED', 'EGP', 'NIS', etc.
+  duration        Int // in minutes
+  clinicSettingId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  clinicSetting ClinicSetting @relation(fields: [clinicSettingId], references: [id], onDelete: Cascade)
+  Appointment   Appointment[]
+}
+
+model CustomKeyword {
+  id              String   @id @default(cuid())
+  keyword         String // the keyword to match
+  responseEn      String // response in English
+  responseAr      String? // response in Arabic
+  clinicSettingId String
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  clinicSetting ClinicSetting @relation(fields: [clinicSettingId], references: [id], onDelete: Cascade)
+}
+
+model WhatsappSession {
+  id            String   @id @default(cuid())
+  userId        String
+  sessionId     String // the session ID from WasenderAPI
+  apiKey        String // the API key from WasenderAPI
+  webhookSecret String // the webhook secret from WasenderAPI
+  phoneNumber   String // the WhatsApp number associated with this session
+  status        String // 'active', 'inactive', 'expired', 'pending'
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  // Relations
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages Message[]
+}
+
+model Message {
+  id                String   @id @default(cuid())
+  whatsappSessionId String
+  senderNumber      String // the sender's phone number
+  recipientNumber   String // the recipient's phone number
+  messageType       String // 'text', 'image', 'video', etc.
+  content           String // the message content (encrypted)
+  direction         String // 'inbound', 'outbound'
+  status            String? // 'sent', 'delivered', 'read', 'failed'
+  timestamp         DateTime @default(now())
+  languageUsed      String? // 'en', 'ar'
+  encryptedAtRest   Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  // Relations
+  whatsappSession WhatsappSession @relation(fields: [whatsappSessionId], references: [id], onDelete: Cascade)
+}
+
+model Appointment {
+  id              String   @id @default(cuid())
+  userId          String
+  patientName     String // might be encrypted
+  patientPhone    String // might be encrypted
+  serviceId       String
+  appointmentDate DateTime
+  status          String // 'scheduled', 'confirmed', 'completed', 'cancelled'
+  notes           String?
+  encryptedAtRest Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // Relations
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
 }
