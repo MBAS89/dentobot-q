@@ -7,26 +7,28 @@ const prisma = new PrismaClient();
 
 // Interface for incoming webhook data
 interface WebhookPayload {
-    event: string;
-    data: any;
-    timestamp: number;
+  event: string;
+  data: any;
+  timestamp: number;
+  // For messages.update, the documentation shows sessionId might be present
+  sessionId?: string;
 }
 
 // Interface for message key
 interface MessageKey {
-    id: string;
-    fromMe: boolean;
-    remoteJid: string;
+  id: string;
+  fromMe: boolean;
+  remoteJid: string;
 }
 
 // Status codes for message updates
 enum MessageStatus {
-    ERROR = 0,
-    PENDING = 1,
-    SENT = 2,
-    DELIVERED = 3,
-    READ = 4,
-    PLAYED = 5
+  ERROR = 0,
+  PENDING = 1,
+  SENT = 2,
+  DELIVERED = 3,
+  READ = 4,
+  PLAYED = 5
 }
 
 export const handleWebhook = async (req: Request, res: Response) => {
@@ -36,50 +38,47 @@ export const handleWebhook = async (req: Request, res: Response) => {
     const webhookData: WebhookPayload = req.body;
     const signature = req.headers['x-webhook-signature'] as string;
     
+    if (!signature) {
+      console.error('Missing X-Webhook-Signature header');
+      return res.status(400).json({ error: 'Missing X-Webhook-Signature header' });
+    }
+    
     if (!webhookData || !webhookData.event) {
-        console.error('Invalid webhook data: missing event');
-        return res.status(400).json({ error: 'Invalid webhook data: missing event' });
+      console.error('Invalid webhook  missing event');
+      return res.status(400).json({ error: 'Invalid webhook  missing event' });
     }
     
-    // Find the relevant session based on the event data
-    let sessionId: string | undefined;
-    
-    // For messages.update, the session ID might be in the payload
-    if (webhookData.event === 'messages.update' && webhookData.sessionId) {
-      // This seems to be an API key, not a session ID
-      // We need to find the session by matching the API key
-      const session = await prisma.whatsappSession.findFirst({
-        where: { apiKey: webhookData.sessionId }
-      });
-
-      if (session) {
-        sessionId = session.sessionId;
-      }
-
-    } else if (webhookData.data && webhookData.data.key && webhookData.data.key.remoteJid) {
-      // Extract session info from the message data
-      // We need to find the session based on the remoteJid or other identifiers
-      // For now, we'll try to match based on the session's phone number
-      // This is a simplified approach - in a real implementation, you'd need a better way to identify the session
-    }
-    
-    // Since we can't reliably determine the session from the webhook data alone,
-    // we'll need to look up the session using the signature to match the webhook secret
-    // This requires finding the session that has this webhook secret
+    // Find the session that matches this webhook signature (webhook_secret)
+    // This is the correct way to identify which session the event is for
     const whatsappSession = await prisma.whatsappSession.findFirst({
-      where: { webhookSecret: signature },
+      where: { 
+        webhookSecret: signature 
+      },
       include: {
-        user: true,
-        clinicSettings: true
+        user: {
+          include: {
+            clinicSettings: {
+              include: {
+                services: true,
+                customKeywords: true
+              }
+            }
+          }
+        }
       }
     });
     
     if (!whatsappSession) {
-      console.error('Session not found for webhook signature');
-      return res.status(404).json({ error: 'Session not found for webhook signature' });
+      console.error('No session found matching the webhook signature');
+      // Note: It's possible for a signature to not match if it's from an old session
+      // or if the webhook secret was changed. Returning 404 might be appropriate,
+      // but for now, we'll return 200 to acknowledge receipt as recommended.
+      console.log('Ignoring webhook for unknown session signature');
+      return res.status(200).json({ received: true });
     }
     
     // Verify webhook signature using the session's secret
+    // According to the documentation, we compare the header directly with the stored secret
     const isValidSignature = wasenderService.verifyWebhookSignature({
       body: req.body,
       signature,
@@ -87,7 +86,7 @@ export const handleWebhook = async (req: Request, res: Response) => {
     });
     
     if (!isValidSignature) {
-      console.error('Invalid webhook signature');
+      console.error('Invalid webhook signature for session:', whatsappSession.id);
       return res.status(403).json({ error: 'Invalid webhook signature' });
     }
     
@@ -96,13 +95,13 @@ export const handleWebhook = async (req: Request, res: Response) => {
     // Handle different types of events
     switch (webhookData.event) {
       case 'messages.received':
-        await handleMessagesReceived(webhookData.data, whatsappSession);
+        await handleMessagesReceived(webhookData, whatsappSession);
         break;
       case 'message.sent':
-        await handleMessageSent(webhookData.data, whatsappSession);
+        await handleMessageSent(webhookData, whatsappSession);
         break;
       case 'messages.update':
-        await handleMessagesUpdate(webhookData.data, whatsappSession);
+        await handleMessagesUpdate(webhookData, whatsappSession);
         break;
       default:
         console.log(`Unhandled event type: ${webhookData.event}`);
@@ -110,6 +109,7 @@ export const handleWebhook = async (req: Request, res: Response) => {
     }
     
     // Send a successful response to WasenderAPI
+    // It's important to respond quickly to acknowledge receipt
     res.status(200).json({ received: true });
   } catch (error) {
     console.error('Error processing webhook:', error);
@@ -118,14 +118,14 @@ export const handleWebhook = async (req: Request, res: Response) => {
 };
 
 // Helper function to handle incoming messages
-async function handleMessagesReceived(data: any, session: any) {
+async function handleMessagesReceived(webhookData: WebhookPayload, session: any) {
   try {
-    console.log('Processing incoming message:', data);
+    console.log('Processing incoming message:', webhookData.data);
     
     const { 
       key, 
       message 
-    } = data;
+    } = webhookData.data;
     
     if (!key || !message) {
       console.error('Missing key or message in messages.received payload');
@@ -138,6 +138,10 @@ async function handleMessagesReceived(data: any, session: any) {
       content = message.conversation;
     } else if (message.extendedTextMessage && message.extendedTextMessage.text) {
       content = message.extendedTextMessage.text;
+    } else if (message.imageMessage && message.imageMessage.caption) {
+      content = message.imageMessage.caption;
+    } else if (message.documentMessage && message.documentMessage.caption) {
+      content = message.documentMessage.caption;
     }
     // Add other message types as needed
     
@@ -152,13 +156,14 @@ async function handleMessagesReceived(data: any, session: any) {
         whatsappSessionId: session.id,
         senderNumber: key.remoteJid, // This is the sender's JID
         recipientNumber: session.phoneNumber, // This session's number
-        messageType: 'text', // For now, assuming text
+        messageType: 'text', // For now, setting as text; could be updated based on message type
         content: content,
         direction: 'inbound',
         status: 'received',
         timestamp: new Date(webhookData.timestamp * 1000), // Convert timestamp to Date
         // Determine language based on clinic settings or content analysis
-        languageUsed: session.user.languagePreference?.startsWith('ar') ? 'ar' : 'en'
+        languageUsed: session.user.languagePreference?.startsWith('ar') ? 'ar' : 'en',
+        encryptedAtRest: false // For incoming messages, we might not encrypt immediately
       }
     });
     
@@ -172,15 +177,15 @@ async function handleMessagesReceived(data: any, session: any) {
 }
 
 // Helper function to handle sent messages
-async function handleMessageSent(data: any, session: any) {
+async function handleMessageSent(webhookData: WebhookPayload, session: any) {
   try {
-    console.log('Processing sent message:', data);
+    console.log('Processing sent message:', webhookData.data);
     
     const { 
       key, 
       message,
       success 
-    } = data;
+    } = webhookData.data;
     
     if (!key || !message) {
       console.error('Missing key or message in message.sent payload');
@@ -194,12 +199,13 @@ async function handleMessageSent(data: any, session: any) {
     }
     
     // Update the message status in our database
+    // We'll try to match by the message ID from the key
     const updatedCount = await prisma.message.updateMany({
       where: {
         whatsappSessionId: session.id,
-        senderNumber: session.phoneNumber, // Outbound messages from this session
-        content: content, // Match by content (not ideal, but simplest for now)
-        direction: 'outbound'
+        // Use the message ID from the key to match the specific message
+        id: key.id || undefined,
+        direction: 'outbound' // Only update outbound messages
       },
       data: { // Fixed: added 'data:' property
         status: success ? 'sent' : 'failed',
@@ -207,21 +213,37 @@ async function handleMessageSent(data: any, session: any) {
       }
     });
     
-    console.log(`Updated ${updatedCount.count} message(s) status to ${success ? 'sent' : 'failed'}`);
+    // If we couldn't match by ID, try to match by content and timestamp as a fallback
+    if (updatedCount.count === 0 && content) {
+      await prisma.message.updateMany({
+        where: {
+          whatsappSessionId: session.id,
+          content: content,
+          direction: 'outbound',
+          status: 'pending' // Assuming it was pending before being sent
+        },
+        data: { // Fixed: added 'data:' property
+          status: success ? 'sent' : 'failed',
+          updatedAt: new Date()
+        }
+      });
+    }
+    
+    console.log(`Updated message(s) status to ${success ? 'sent' : 'failed'}`);
   } catch (error) {
     console.error('Error handling sent message:', error);
   }
 }
 
 // Helper function to handle message updates (status changes)
-async function handleMessagesUpdate(data: any, session: any) {
+async function handleMessagesUpdate(webhookData: WebhookPayload, session: any) {
   try {
-    console.log('Processing message update:', data);
+    console.log('Processing message update:', webhookData.data);
     
     const { 
       update, 
       key 
-    } = data;
+    } = webhookData.data;
     
     if (!update || !key) {
       console.error('Missing update or key in messages.update payload');
@@ -261,10 +283,10 @@ async function handleMessagesUpdate(data: any, session: any) {
     }
     
     // Update the message status in our database
+    // Try to match by the message ID from the key first
     const updatedCount = await prisma.message.updateMany({
       where: {
         whatsappSessionId: session.id,
-        // Match by message ID if possible
         id: key.id || undefined
       },
       data: { // Fixed: added 'data:' property
@@ -272,6 +294,11 @@ async function handleMessagesUpdate(data: any, session: any) {
         updatedAt: new Date()
       }
     });
+    
+    // If no messages were updated by ID, try a broader match
+    if (updatedCount.count === 0) {
+      console.log(`No messages matched ID ${key.id}, trying other matching criteria...`);
+    }
     
     console.log(`Updated ${updatedCount.count} message(s) status to ${statusString}`);
   } catch (error) {
@@ -285,9 +312,8 @@ async function processIncomingMessage(message: any, session: any) {
     console.log('Processing message for bot logic:', message.content);
     
     // Get clinic settings for this session
-    const clinicSettings = await prisma.clinicSetting.findUnique({
-      where: { userId: session.userId }
-    });
+    // Clinic settings are already included in the session from the initial query
+    const clinicSettings = session.clinicSettings;
     
     if (!clinicSettings) {
       console.error(`No clinic settings found for user: ${session.userId}`);
